@@ -608,6 +608,47 @@ def panel_images():
     if not lines:
         st.info("Pehle 🎙 Voice panel me voiceover banao.")
         return
+
+    img_mode = st.radio(
+        "Image mode",
+        ["🤖 Auto — AI banayega", "📤 Manual — khud upload karo"],
+        key="img_mode", horizontal=True,
+        help="Auto me AI sab images banata hai (kafi time lagta hai). "
+             "Manual me tum khud har clip ke liye image upload karo — tez.")
+
+    # ---------- MANUAL: khud upload karo ----------
+    if img_mode.startswith("📤"):
+        _done = sum(1 for i in range(len(lines))
+                    if st.session_state["images"].get(i))
+        st.caption(f"📊 {_done}/{len(lines)} images uploaded")
+        st.info("Har clip ke neeche apni image upload karo — "
+                "upload hote hi auto-save ho jayegi.")
+        mcols = st.columns(3)
+        for i, line in enumerate(lines):
+            with mcols[i % 3]:
+                st.caption(f"🎞️ Clip {i + 1}: {line[:45]}")
+                data = st.session_state["images"].get(i)
+                if data:
+                    src = st.session_state["img_src"].get(i, "")
+                    tag = {"ai": "🤖", "upload": "📤",
+                           "stock": "📷"}.get(src, "")
+                    st.image(data, use_container_width=True,
+                             caption=f"{tag} lag gayi" if tag else "lag gayi")
+                up = st.file_uploader("upload", type=["jpg", "jpeg", "png",
+                                                     "webp"],
+                                      key=f"manual_up_{i}",
+                                      label_visibility="collapsed")
+                if up is not None:
+                    b = up.getvalue()
+                    if st.session_state["images"].get(i) != b:
+                        st.session_state["images"][i] = b
+                        st.session_state["img_src"][i] = "upload"
+                        _write_image_to_disk(i, b)
+                        save_project()
+                        st.rerun()
+        return
+
+    # ---------- AUTO: AI banayega ----------
     colA, colB = st.columns(2)
     with colA:
         st.selectbox("Image model", ["flux", "turbo"], index=0, key="img_model",
