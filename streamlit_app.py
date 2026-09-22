@@ -312,6 +312,65 @@ if st.session_state["voice_path"]:
                          VOICE_CHOICES[voice_name], whisper_mode,
                          Path(st.session_state["workdir"]))
 
+def _paint_line_status(slot, i, line):
+    """Left pane: ek line ka live status."""
+    data = st.session_state["images"].get(i)
+    src = st.session_state["img_src"].get(i, "")
+    icon = "✅" if data else "⏳"
+    src_tag = {"ai": "🤖", "upload": "📤", "stock": "📷"}.get(src, "")
+    tag = f" {src_tag}" if src_tag else ""
+    slot.caption(f"{icon}{tag} **{i + 1}.** {line[:80]}")
+
+
+def _paint_image_actions(i, line, img_model, pexels_key):
+    """Right pane: ek image ke neeche correction buttons."""
+    b1, b2 = st.columns(2)
+    with b1:
+        if st.button("🔄 Dobara", key=f"regen_{i}"):
+            try:
+                seed = st.session_state["img_seeds"].get(i, 1) + 913
+                data = image_gen.generate_image(
+                    image_gen.horror_prompt(line), seed=seed,
+                    model=img_model)
+                st.session_state["images"][i] = data
+                st.session_state["img_src"][i] = "ai"
+                st.session_state["img_seeds"][i] = seed
+                _write_image_to_disk(i, data)
+                save_project()
+                st.rerun()
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Fail: {e}")
+    with b2:
+        up = st.file_uploader("📤", type=["jpg", "jpeg", "png", "webp"],
+                              key=f"up_{i}", label_visibility="collapsed")
+        if up is not None:
+            data = up.getvalue()
+            if st.session_state["images"].get(i) != data:
+                st.session_state["images"][i] = data
+                st.session_state["img_src"][i] = "upload"
+                _write_image_to_disk(i, data)
+                save_project()
+                st.rerun()
+    if pexels_key:
+        if st.button("📷 Stock photo", key=f"stock_{i}"):
+            try:
+                import re
+                kw = " ".join(re.findall(r"[a-zA-Z]{4,}", line)[:4])
+                res = image_gen.pexels_search(
+                    f"horror dark {kw}", pexels_key, per_page=1)
+                if res:
+                    data = image_gen.download_url(res[0]["url"])
+                    st.session_state["images"][i] = data
+                    st.session_state["img_src"][i] = "stock"
+                    _write_image_to_disk(i, data)
+                    save_project()
+                    st.rerun()
+                else:
+                    st.warning("Stock nahi mila.")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Stock fail: {e}")
+
+
 # ================= STEP 2 — images =================
 st.header("2️⃣ Images (AI khud banayega)")
 
@@ -328,10 +387,41 @@ else:
                                    type="password",
                                    help="pexels.com se free key — stock photo fallback ke liye")
 
-    if st.button("🖼️ Sab images banao (AI)", type="primary"):
-        bar = st.progress(0, text="Images ban rahi hain...")
-        ok, fail = 0, []
+    go_images = st.button("🖼️ Sab images banao (AI)", type="primary")
+
+    # ---------- live studio: ek taraf script, doosri taraf images ----------
+    st.subheader("🎬 Live Studio")
+    overall_slot = st.empty()
+    _done0 = sum(1 for i in range(len(lines)) if st.session_state["images"].get(i))
+    overall_slot.caption(f"📊 {_done0}/{len(lines)} images tayyar")
+    pane_script, pane_visual = st.columns([1, 1.15])
+    status_slots, img_slots = {}, {}
+    with pane_script:
+        st.caption("📜 Script + live status")
         for i, line in enumerate(lines):
+            status_slots[i] = st.empty()
+            _paint_line_status(status_slots[i], i, line)
+    with pane_visual:
+        st.caption("🖼️ Images — bante hi yahan nazar aayengi")
+        vcols = st.columns(2)
+        for i, line in enumerate(lines):
+            with vcols[i % 2]:
+                st.caption(f"🎞️ Clip {i + 1}: {line[:55]}")
+                img_slots[i] = st.empty()
+                data = st.session_state["images"].get(i)
+                if data:
+                    img_slots[i].image(data, use_container_width=True)
+                else:
+                    img_slots[i].caption("⏳ Abhi nahi bani")
+                _paint_image_actions(i, line, img_model, pexels_key)
+
+    if go_images:
+        ok, fail, done = 0, [], _done0
+        for i, line in enumerate(lines):
+            if st.session_state["images"].get(i):
+                continue  # bani hui skip — dobara nahi banao
+            status_slots[i].caption(f"🎨 **{i + 1}.** {line[:80]} — ban rahi hai...")
+            img_slots[i].caption("🎨 Ban rahi hai...")
             try:
                 seed = 1000 + i * 77
                 data = image_gen.generate_image(
@@ -342,70 +432,18 @@ else:
                 _write_image_to_disk(i, data)
                 save_project()  # har image ke baad save — beech me ruke to wahi se
                 ok += 1
+                done += 1
+                _paint_line_status(status_slots[i], i, line)
+                img_slots[i].image(data, use_container_width=True)
+                overall_slot.caption(f"📊 {done}/{len(lines)} images tayyar")
             except Exception as e:  # noqa: BLE001
                 fail.append(i + 1)
-            bar.progress((i + 1) / len(lines),
-                         text=f"Image {i + 1}/{len(lines)}...")
-        bar.progress(1.0, text="Ho gaya! ✅")
+                status_slots[i].caption(f"❌ **{i + 1}.** {line[:80]} — fail")
+                img_slots[i].caption("❌ Nahi ban saki — dobara try karo")
         if fail:
-            st.warning(f"Ye lines ki images nahi ban saki: {fail} — dobara try karo ya upload karo.")
+            st.warning(f"Ye clips ki images nahi ban saki: {fail} — neeche 🔄 Dobara dabao ya upload karo.")
         else:
-            st.success(f"{ok} images tayyar ✅")
-
-    # per-image grid: preview + regenerate + upload + stock
-    if st.session_state["images"]:
-        st.subheader("Images ka jaiza (pasand na aaye to dobara banao)")
-        cols = st.columns(3)
-        for i, line in enumerate(lines):
-            with cols[i % 3]:
-                st.caption(f"Clip {i + 1}: {line[:60]}")
-                data = st.session_state["images"].get(i)
-                if data:
-                    st.image(data, use_container_width=True)
-                b1, b2 = st.columns(2)
-                with b1:
-                    if st.button("🔄 Dobara", key=f"regen_{i}"):
-                        try:
-                            seed = st.session_state["img_seeds"].get(i, 1) + 913
-                            data = image_gen.generate_image(
-                                image_gen.horror_prompt(line), seed=seed,
-                                model=img_model)
-                            st.session_state["images"][i] = data
-                            st.session_state["img_src"][i] = "ai"
-                            st.session_state["img_seeds"][i] = seed
-                            _write_image_to_disk(i, data)
-                            save_project()
-                            st.rerun()
-                        except Exception as e:  # noqa: BLE001
-                            st.error(f"Fail: {e}")
-                with b2:
-                    up = st.file_uploader("📤 Upload", type=["jpg", "jpeg", "png", "webp"],
-                                          key=f"up_{i}", label_visibility="collapsed")
-                    if up is not None:
-                        data = up.getvalue()
-                        st.session_state["images"][i] = data
-                        st.session_state["img_src"][i] = "upload"
-                        _write_image_to_disk(i, data)
-                        save_project()
-                        st.rerun()
-                if pexels_key:
-                    if st.button("📷 Stock photo", key=f"stock_{i}"):
-                        try:
-                            import re
-                            kw = " ".join(re.findall(r"[a-zA-Z]{4,}", line)[:4])
-                            res = image_gen.pexels_search(
-                                f"horror dark {kw}", pexels_key, per_page=1)
-                            if res:
-                                data = image_gen.download_url(res[0]["url"])
-                                st.session_state["images"][i] = data
-                                st.session_state["img_src"][i] = "stock"
-                                _write_image_to_disk(i, data)
-                                save_project()
-                                st.rerun()
-                            else:
-                                st.warning("Stock nahi mila.")
-                        except Exception as e:  # noqa: BLE001
-                            st.error(f"Stock fail: {e}")
+            st.success(f"{ok} nayi images tayyar ✅ — sab {done}/{len(lines)} ready")
 
 
 def build_project(lines, voice_path, images, music_path, workdir, name="project"):
@@ -492,12 +530,21 @@ else:
             st.warning("Shorts ka format samajh nahi aaya — default istemal hoga.")
 
         bar = st.progress(0, text="Render ho raha hai...")
+        render_slot = st.empty()
+        n_clips = len(lines)
+
+        def _render_cb(p):
+            clip = min(int(p * n_clips) + 1, n_clips) if n_clips else 0
+            bar.progress(p, text=f"Clip {clip}/{n_clips} — edit ho raha hai...")
+            render_slot.caption(
+                f"🎬 Clip {clip}/{n_clips} — transitions, effects, captions lag rahe hain...")
+
         try:
             with st.status("Video render ho rahi hai... (kuch minute lag sakte hain)",
                            expanded=True):
                 long_out, shorts_made = horror_edit.run_pipeline(
                     str(proj), cfg, model="tiny",
-                    progress_cb=lambda p: bar.progress(p, text="Render ho raha hai..."),
+                    progress_cb=_render_cb,
                     captions=captions_on, language="en",
                 )
             st.session_state["long_video"] = str(long_out)
