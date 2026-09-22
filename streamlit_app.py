@@ -48,6 +48,7 @@ for k, v in {
     "thumb_path": None, "thumb_words": "",
     "meta": None,
     "gemini_titles": None, "thumb_ai_path": None,
+    "gemini_keys_ok": None,
     "dubs": {},        # lang_key -> {"video": path, "shorts": [...], "voice": path}
 }.items():
     st.session_state.setdefault(k, v)
@@ -586,31 +587,54 @@ if st.session_state["shorts"]:
 st.header("4️⃣ Thumbnail + Upload Metadata")
 
 if st.session_state["long_video"] and st.session_state["images"]:
-    gemini_key = st.text_input(
-        "🔑 Gemini API key (free — aistudio.google.com/apikey se lo)",
-        type="password",
-        help="Key sirf isi session me rehti hai — kahin save nahi hoti. "
-             "Is se AI titles aur AI thumbnail bante hain.")
+    st.subheader("🔑 Gemini API Keys")
+    st.link_button("🆓 Free API key hasil karo",
+                   "https://aistudio.google.com/apikey",
+                   help="Google AI Studio khulega — wahan 'Get API key' dabao, bilkul free")
+    gemini_keys_raw = st.text_area(
+        "API keys yahan paste karo (har line me ek — ek account ki hon ya alag alag, jitni marzi)",
+        help="Keys sirf isi session me rehti hain — kahin save nahi hotin. "
+             "Zyada keys ka matlab zyada free limit.")
+    keys = [k.strip() for k in (gemini_keys_raw or "").splitlines() if k.strip()]
+
+    if st.button("🔌 Connect", disabled=not keys,
+                 help="Pehle oopar keys paste karo"):
+        working = []
+        for k in keys:
+            ok, msg = gemini_helper.test_key(k)
+            mark = "✅" if ok else "❌"
+            st.caption(f"{mark} `...{k[-4:]}` — {msg}")
+            if ok:
+                working.append(k)
+        st.session_state["gemini_keys_ok"] = working
+        if working:
+            st.success(f"{len(working)}/{len(keys)} key(s) connect ho gayin ✅")
+        else:
+            st.error("Koi key connect nahi hui — keys dobara check karo")
+
+    connected = st.session_state.get("gemini_keys_ok") or []
+    if connected:
+        st.caption("🔌 Keys connected — ek ki limit khatam ho to agli key khud lag jayegi")
 
     g1, g2 = st.columns(2)
     with g1:
-        if st.button("✨ Gemini se Titles banao", disabled=not gemini_key,
-                     help="Pehle Gemini API key dalo"):
+        if st.button("✨ Gemini se Titles banao", disabled=not connected,
+                     help="Pehle oopar keys Connect karo"):
             try:
                 with st.spinner("Gemini titles soch raha hai..."):
                     titles = gemini_helper.generate_titles(
-                        gemini_key, st.session_state["lines"])
+                        connected, st.session_state["lines"])
                 st.session_state["gemini_titles"] = titles
                 save_project()
             except Exception as e:  # noqa: BLE001
                 st.error(f"Gemini fail: {e}")
     with g2:
-        if st.button("🎨 Gemini se AI Thumbnail", disabled=not gemini_key,
-                     help="Pehle Gemini API key dalo"):
+        if st.button("🎨 Gemini se AI Thumbnail", disabled=not connected,
+                     help="Pehle oopar keys Connect karo"):
             try:
                 with st.spinner("Gemini thumbnail bana raha hai... (1-2 min lag sakte hain)"):
                     img_bytes = gemini_helper.generate_thumbnail(
-                        gemini_key, st.session_state["lines"],
+                        connected, st.session_state["lines"],
                         st.session_state.get("thumb_words", ""))
                 out = Path(st.session_state["workdir"]) / "thumbnail_gemini.jpg"
                 out.write_bytes(img_bytes)
