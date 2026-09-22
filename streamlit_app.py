@@ -311,93 +311,203 @@ def parse_shorts(text):
     return shorts
 
 
-def run_auto_pipeline():
-    """🤖 Auto Pilot: ek click me script -> voiceover -> images -> video.
+# ============================ AUTO PILOT (resumable stage machine) ============================
+# Ek click me voice -> images -> video. Har stage ek-ek karke hota hai.
+# Beech me koi panel kholo to Auto PAUSE hota hai (dobara zero se NAHI),
+# aur "Continue" se wahin se shuru hota hai jahan ruka tha.
+# Images ki bari aane par manual/auto ka option aata hai.
 
-    Har step complete hote hi agla khud start hota hai — kuch dabane ki
-    zaroorat nahi. Beech me ruke to wahi panel se manually continue karo.
-    """
-    st.header("🤖 Auto Pilot chal raha hai...")
-    st.caption("Step complete hote hi agla khud start hoga. Roko mat — "
-               "kuch minute lag sakte hain.")
-    lines = current_script_lines()
-    if not lines:
-        st.error("Script khaali hai — pehle 📝 Script panel me likho.")
-        return
+AUTO_STAGE_LABEL = {
+    "voice": "🎙️ Voiceover",
+    "images_ask": "🖼️ Images: manual ya auto?",
+    "images": "🖼️ Images (AI)",
+    "images_manual": "🖼️ Images (manual upload)",
+    "render": "🎞️ Video render",
+    "done": "✅ Complete",
+}
 
-    # ---- step 1/3: voiceover ----
-    st.subheader("1/3 — 🎙 Voiceover")
+_AUTO_FRESH = {"images": {}, "img_src": {}, "img_seeds": {}, "dubs": {},
+               "_img_fail": {}, "long_video": None, "shorts": [],
+               "thumb_path": None, "thumb_words": "", "gemini_titles": None,
+               "thumb_ai_path": None, "meta": None, "render_cfg": None}
+
+
+def _auto_placeholder_image(i):
+    """AI fail ho jaye to render na ruke — simple dark placeholder."""
+    from PIL import Image, ImageDraw
+    import io as _io
+    img = Image.new("RGB", (1024, 576), (22, 8, 10))
+    d = ImageDraw.Draw(img)
+    d.rectangle([40, 40, 984, 536], outline=(120, 25, 25), width=6)
+    d.text((430, 270), f"CLIP {i + 1}", fill=(150, 35, 35))
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _auto_fresh_setup(new_lines):
+    """Nayi script par Auto dabane par saaf setup."""
     reset_autosave_disk()
-    st.session_state["lines"] = lines
+    st.session_state["lines"] = new_lines
     tmp = AUTOSAVE_DIR / "work"
     if tmp.exists():
         shutil.rmtree(tmp)
     tmp.mkdir(parents=True, exist_ok=True)
     st.session_state["workdir"] = str(tmp)
-    for k, v in {"images": {}, "img_src": {}, "img_seeds": {},
-                 "long_video": None, "shorts": [],
-                 "thumb_path": None, "thumb_words": "",
-                 "gemini_titles": None, "thumb_ai_path": None,
-                 "meta": None, "dubs": {}, "render_cfg": None}.items():
+    for k, v in _AUTO_FRESH.items():
         st.session_state[k] = v
-    vname = st.session_state.get("voice_sel_name", list(VOICE_CHOICES)[0])
-    do_voiceover(lines, VOICE_CHOICES[vname],
-                 st.session_state.get("whisper_mode", True), tmp)
-    if not st.session_state["voice_path"]:
-        st.error("Voiceover fail — Auto Pilot ruk gaya.")
-        return
 
-    # ---- step 2/3: images ----
-    st.subheader("2/3 — 🖼 Images")
-    bar = st.progress(0, text="Images ban rahi hain...")
-    for i, line in enumerate(lines):
+
+def auto_start():
+    """Sidebar Auto button — smart start/resume, kabhi blind wipe nahi."""
+    new_lines = current_script_lines()
+    if not new_lines:
+        st.error("Pehle 📝 Script panel me script likho.")
+        return
+    if st.session_state.get("lines") != new_lines:
+        _auto_fresh_setup(new_lines)  # nayi script → fresh
+    wd = st.session_state.get("workdir")
+    if not wd or not Path(wd).exists():
+        wd = str(AUTOSAVE_DIR / "work")
+        Path(wd).mkdir(parents=True, exist_ok=True)
+        st.session_state["workdir"] = wd
+    images = st.session_state.get("images") or {}
+    if not st.session_state.get("voice_path"):
+        stage = "voice"
+    elif all(images.get(i) for i in range(len(new_lines))):
+        stage = "render"
+    else:
+        stage = "images_ask"
+    st.session_state["auto_stage"] = stage
+    st.session_state["auto_run"] = True
+    st.session_state["auto_paused"] = False
+    st.rerun()
+
+
+def run_auto_step():
+    """Har rerun me ek chhota kaam — kabhi dobara zero se nahi."""
+    lines = st.session_state.get("lines") or []
+    if not lines:
+        st.session_state["auto_run"] = False
+        return
+    images = st.session_state.get("images") or {}
+    stage = st.session_state.get("auto_stage", "voice")
+
+    if stage == "voice":
+        st.header("🤖 Auto Pilot — 🎙️ Voiceover")
+        if st.session_state.get("voice_path"):
+            st.session_state["auto_stage"] = "images_ask"
+            st.rerun()
+            return
+        wd = Path(st.session_state.get("workdir") or (AUTOSAVE_DIR / "work"))
+        wd.mkdir(parents=True, exist_ok=True)
+        vname = st.session_state.get("voice_sel_name",
+                                     list(VOICE_CHOICES)[0])
+        do_voiceover(lines, VOICE_CHOICES[vname],
+                     st.session_state.get("whisper_mode", True), wd)
+        if st.session_state.get("voice_path"):
+            st.session_state["auto_stage"] = "images_ask"
+        else:
+            st.session_state["auto_paused"] = True  # fail → ruko, user dekhe
+        st.rerun()
+
+    elif stage == "images_ask":
+        return  # neeche banner me manual/auto choice aati hai
+
+    elif stage == "images":
+        missing = [i for i in range(len(lines)) if not images.get(i)]
+        if not missing:
+            save_project()
+            st.session_state["auto_stage"] = "render"
+            st.rerun()
+            return
+        i = missing[0]
+        done = len(lines) - len(missing)
+        st.header("🤖 Auto Pilot — 🖼️ Images (AI)")
+        st.progress(done / len(lines),
+                    text=f"Image {done + 1}/{len(lines)} ban rahi hai...")
+        st.caption("⏸️ Rokna ho to koi bhi panel kholo — Auto pause ho "
+                   "jayega, dobara start nahi hoga.")
         try:
             seed = 1000 + i * 77
             data = image_gen.generate_image(
-                image_gen.horror_prompt(line), seed=seed, model="flux")
+                image_gen.horror_prompt(lines[i]), seed=seed, model="flux")
             st.session_state["images"][i] = data
             st.session_state["img_src"][i] = "ai"
             st.session_state["img_seeds"][i] = seed
             _write_image_to_disk(i, data)
         except Exception as e:  # noqa: BLE001
-            st.warning(f"Clip {i + 1} fail: {e} — baad me 🖼 Images panel se dobara banao")
-        bar.progress((i + 1) / len(lines),
-                     text=f"Image {i + 1}/{len(lines)}")
-    save_project()
-
-    # ---- step 3/3: render ----
-    st.subheader("3/3 — 🎞 Video render")
-    workdir = Path(st.session_state["workdir"])
-    music_path = MUSIC_BUNDLED if MUSIC_BUNDLED.exists() else None
-    proj = build_project(lines, st.session_state["voice_path"],
-                         st.session_state["images"], music_path,
-                         workdir, "project")
-    cfg = dict(horror_edit.DEFAULT_CONFIG)
-    cfg["delogo_idx"] = {i for i, s in st.session_state["img_src"].items()
-                         if s == "ai"}
-    bar2 = st.progress(0, text="Render ho raha hai...")
-    n_clips = len(lines)
-    try:
-        with st.status("Video render ho rahi hai...", expanded=True):
-            long_out, shorts_made = horror_edit.run_pipeline(
-                str(proj), cfg, model="tiny",
-                progress_cb=lambda p: bar2.progress(
-                    p, text=f"Clip {min(int(p * n_clips) + 1, n_clips)}/{n_clips}"),
-                captions=True, language="en",
-            )
-        st.session_state["long_video"] = str(long_out)
-        st.session_state["shorts"] = [str(s) for s in shorts_made]
-        st.session_state["render_cfg"] = {
-            "captions": True, "shorts": cfg["shorts"],
-            "music": bool(music_path),
-        }
+            fails = st.session_state.get("_img_fail") or {}
+            n = fails.get(i, 0) + 1
+            fails[i] = n
+            st.session_state["_img_fail"] = fails
+            if n >= 2:
+                st.warning(f"Clip {i + 1} AI se nahi bani — placeholder laga diya")
+                ph = _auto_placeholder_image(i)
+                st.session_state["images"][i] = ph
+                st.session_state["img_src"][i] = "ai"
+                _write_image_to_disk(i, ph)
+            else:
+                st.warning(f"Clip {i + 1} fail ({e}) — dobara try ho rahi hai")
         save_project()
-        bar2.progress(1.0, text="Ho gaya! ✅")
-        st.success("🎉 Auto Pilot complete! Video tayyar — "
-                   "🎞 Edit & Video panel me dekho.")
-        st.balloons()
-    except Exception as e:  # noqa: BLE001
-        st.error(f"Render fail: {e}")
+        st.rerun()
+
+    elif stage == "images_manual":
+        missing = [i for i in range(len(lines)) if not images.get(i)]
+        if not missing:
+            save_project()
+            st.session_state["auto_stage"] = "render"
+            st.session_state["auto_paused"] = False
+            st.rerun()
+            return
+        # user Images panel me upload karegi — pause rakho
+        st.session_state["auto_paused"] = True
+        st.rerun()
+
+    elif stage == "render":
+        if st.session_state.get("long_video"):
+            st.session_state["auto_stage"] = "done"
+            st.session_state["auto_run"] = False
+            st.rerun()
+            return
+        st.header("🤖 Auto Pilot — 🎞️ Video render")
+        workdir = Path(st.session_state.get("workdir")
+                       or (AUTOSAVE_DIR / "work"))
+        workdir.mkdir(parents=True, exist_ok=True)
+        music_path = MUSIC_BUNDLED if MUSIC_BUNDLED.exists() else None
+        proj = build_project(lines, st.session_state["voice_path"],
+                             st.session_state.get("images") or {},
+                             music_path, workdir, "project")
+        cfg = dict(horror_edit.DEFAULT_CONFIG)
+        cfg["delogo_idx"] = {i for i, s in
+                             (st.session_state.get("img_src") or {}).items()
+                             if s == "ai"}
+        bar = st.progress(0, text="Render ho raha hai...")
+        n_clips = len(lines)
+        try:
+            with st.status("Video render ho rahi hai...", expanded=True):
+                long_out, shorts_made = horror_edit.run_pipeline(
+                    str(proj), cfg, model="tiny",
+                    progress_cb=lambda p: bar.progress(
+                        p, text=f"Clip {min(int(p * n_clips) + 1, n_clips)}/{n_clips}"),
+                    captions=True, language="en",
+                )
+            st.session_state["long_video"] = str(long_out)
+            st.session_state["shorts"] = [str(s) for s in shorts_made]
+            st.session_state["render_cfg"] = {
+                "captions": True, "shorts": cfg["shorts"],
+                "music": bool(music_path),
+            }
+            save_project()
+            st.session_state["auto_stage"] = "done"
+            st.session_state["auto_run"] = False
+            st.success("🎉 Auto Pilot complete! Video tayyar — "
+                       "🎞️ Edit & Video panel me dekho.")
+            st.balloons()
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Render fail: {e} — Auto ruk gaya, "
+                     "Edit panel se dobara try karo")
+            st.session_state["auto_paused"] = True
 
 
 # ============================ SIDEBAR ============================
@@ -406,10 +516,19 @@ with st.sidebar:
     st.caption("CapCut-style panels — sab kuch ek jaga")
     st.radio("🌓 Theme", ["🌙 Night", "🌞 Day"], key="app_theme",
              horizontal=True)
-    if st.button("🤖 Auto: Script → Video", type="primary",
-                 help="Ek click — voiceover, images aur final video khud ban jayenge"):
-        st.session_state["auto_run"] = True
-        st.rerun()
+    if st.session_state.get("auto_run"):
+        _st = st.session_state.get("auto_stage", "voice")
+        _pl = ("⏸️ paused" if st.session_state.get("auto_paused")
+               else "▶ chal raha")
+        st.info(f"🤖 Auto: {AUTO_STAGE_LABEL.get(_st, _st)} {_pl}")
+        if st.button("⏹️ Auto roko"):
+            st.session_state["auto_run"] = False
+            st.session_state["auto_paused"] = False
+            st.rerun()
+    elif st.button("🤖 Auto: Script → Video", type="primary",
+                   help="Ek click — voiceover, images aur final video. "
+                        "Beech me ruke to wahin se continue hota hai."):
+        auto_start()
     st.divider()
     step = st.radio("Panels", STEPS, key="nav_step")
 
@@ -533,10 +652,52 @@ if (not st.session_state["_booted"] and has_saved_project()
 else:
     st.session_state["_booted"] = True
 
-# 🤖 Auto Pilot — ek click me saare steps
+# ============================ AUTO PILOT control ============================
 st.session_state.setdefault("auto_run", False)
-if st.session_state.pop("auto_run", False):
-    run_auto_pipeline()
+st.session_state.setdefault("auto_paused", False)
+_cur_panel = st.session_state.get("nav_step", STEPS[0])
+if st.session_state["auto_run"] and _cur_panel != st.session_state.get("_auto_panel"):
+    # user ne panel badla -> Auto PAUSE (view mode), dobara start NAHI
+    st.session_state["auto_paused"] = True
+st.session_state["_auto_panel"] = _cur_panel
+
+if st.session_state["auto_run"]:
+    _stage = st.session_state.get("auto_stage", "voice")
+    _label = AUTO_STAGE_LABEL.get(_stage, _stage)
+    if _stage == "images_ask":
+        st.warning("🤖 **Auto Pilot pooch raha hai:** images kaise banani hain?")
+        _b1, _b2 = st.columns(2)
+        with _b1:
+            if st.button("🤖 AI se banao (auto)", type="primary",
+                         key="auto_pick_ai"):
+                st.session_state["auto_stage"] = "images"
+                st.session_state["auto_paused"] = False
+                st.rerun()
+        with _b2:
+            if st.button("📤 Khud upload karungi (manual)",
+                         key="auto_pick_manual"):
+                st.session_state["img_mode"] = "📤 Manual — khud upload karo"
+                st.session_state["auto_stage"] = "images_manual"
+                st.session_state["auto_paused"] = True
+                st.rerun()
+    elif st.session_state["auto_paused"]:
+        _ln = len(st.session_state.get("lines") or [])
+        _im = sum(1 for i in range(_ln)
+                  if (st.session_state.get("images") or {}).get(i))
+        if _stage == "images_manual":
+            st.info(f"⏸️ Auto Pilot ruka hai — 🖼️ Images panel me {_im}/{_ln} "
+                    "upload karo, phir neeche ▶ Continue dabao.")
+        else:
+            st.info(f"⏸️ Auto Pilot paused ({_label}) — kuch zaya nahi hua.")
+        if st.button("▶ Auto continue — wahin se jahan ruka tha",
+                     type="primary", key="auto_continue"):
+            st.session_state["auto_paused"] = False
+            st.rerun()
+    else:
+        st.caption(f"🤖 Auto Pilot chal raha hai: {_label} ...")
+
+    if not st.session_state["auto_paused"] and _stage != "images_ask":
+        run_auto_step()
     st.divider()
 
 
