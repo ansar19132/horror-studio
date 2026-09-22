@@ -6,6 +6,7 @@ Plus: thumbnail, upload metadata, multi-language dubs, bundled music.
 
 Deploy: Streamlit Community Cloud.
 """
+import json
 import shutil
 import sys
 import tempfile
@@ -40,12 +41,174 @@ for k, v in {
     "images": {},      # idx -> bytes
     "img_src": {},     # idx -> "ai" | "upload" | "stock"
     "img_seeds": {},
+    "workdir": None,
+    "render_cfg": None,
     "long_video": None, "shorts": [],
     "thumb_path": None, "thumb_words": "",
     "meta": None,
     "dubs": {},        # lang_key -> {"video": path, "shorts": [...], "voice": path}
 }.items():
     st.session_state.setdefault(k, v)
+
+# ---------------- project auto-save / resume ----------------
+# Har step ke baad progress disk par save hota hai. App band ho jaye ya
+# browser refresh ho jaye to dobara kholne par wahi se continue hota hai.
+# Clear SIRF user ke button se hota hai — khud kuch delete nahi hota.
+PROJECTS_DIR = APP_DIR / "projects"
+AUTOSAVE_DIR = PROJECTS_DIR / "autosave"
+AUTOSAVE_JSON = AUTOSAVE_DIR / "project.json"
+AUTOSAVE_IMG_DIR = AUTOSAVE_DIR / "images"
+PROJECTS_DIR.mkdir(exist_ok=True)
+AUTOSAVE_DIR.mkdir(exist_ok=True)
+AUTOSAVE_IMG_DIR.mkdir(exist_ok=True)
+
+SAVE_KEYS = ["lines", "voice_path", "timings", "img_src", "img_seeds",
+             "workdir", "render_cfg", "long_video", "shorts",
+             "thumb_path", "thumb_words", "meta", "dubs"]
+
+
+def _write_image_to_disk(i, data):
+    try:
+        (AUTOSAVE_IMG_DIR / f"{int(i):03d}.jpg").write_bytes(data)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def save_project():
+    """Persist current progress to disk. Must never break the app."""
+    try:
+        data = {}
+        for k in SAVE_KEYS:
+            v = st.session_state.get(k)
+            try:
+                json.dumps(v)
+                data[k] = v
+            except (TypeError, ValueError):
+                data[k] = None
+        images = st.session_state.get("images", {}) or {}
+        idx_done = []
+        for i, b in images.items():
+            if not b:
+                continue
+            p = AUTOSAVE_IMG_DIR / f"{int(i):03d}.jpg"
+            if not p.exists():
+                _write_image_to_disk(i, b)
+            idx_done.append(int(i))
+        data["image_idx"] = sorted(idx_done)
+        AUTOSAVE_JSON.write_text(json.dumps(data), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def has_saved_project():
+    return AUTOSAVE_JSON.exists()
+
+
+def load_project():
+    """Restore auto-saved project into session state."""
+    try:
+        data = json.loads(AUTOSAVE_JSON.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return False
+    for k in SAVE_KEYS:
+        if k in data and data[k] is not None:
+            st.session_state[k] = data[k]
+    # int keys JSON me string ban jate hain — wapas int karo
+    for k in ("img_src", "img_seeds"):
+        d = st.session_state.get(k) or {}
+        try:
+            st.session_state[k] = {int(kk): vv for kk, vv in d.items()}
+        except Exception:  # noqa: BLE001
+            pass
+    images = {}
+    for i in data.get("image_idx", []):
+        try:
+            p = AUTOSAVE_IMG_DIR / f"{int(i):03d}.jpg"
+            if p.exists():
+                images[int(i)] = p.read_bytes()
+        except Exception:  # noqa: BLE001
+            pass
+    st.session_state["images"] = images
+    # jo files ab mojood nahi, unke path hata do (crash se bacho)
+    for k in ("voice_path", "long_video", "thumb_path"):
+        p = st.session_state.get(k)
+        if p and not Path(p).exists():
+            st.session_state[k] = None
+    st.session_state["shorts"] = [
+        s for s in (st.session_state.get("shorts") or []) if Path(s).exists()]
+    dubs = st.session_state.get("dubs") or {}
+    st.session_state["dubs"] = {
+        k: v for k, v in dubs.items()
+        if isinstance(v, dict) and v.get("video") and Path(v["video"]).exists()}
+    return True
+
+
+def reset_autosave_disk():
+    """Sirf disk ka save wipe karo (naya project) — session state waisi rahe."""
+    shutil.rmtree(AUTOSAVE_DIR, ignore_errors=True)
+    AUTOSAVE_DIR.mkdir(exist_ok=True)
+    AUTOSAVE_IMG_DIR.mkdir(exist_ok=True)
+
+
+def clear_saved_project():
+    """Full clear — sirf user ke clear button se call hota hai."""
+    reset_autosave_disk()
+    for k, v in {
+        "lines": [], "voice_path": None, "timings": None,
+        "images": {}, "img_src": {}, "img_seeds": {},
+        "workdir": None, "render_cfg": None,
+        "long_video": None, "shorts": [],
+        "thumb_path": None, "thumb_words": "",
+        "meta": None, "dubs": {},
+    }.items():
+        st.session_state[k] = v
+
+
+# ---------------- resume banner ----------------
+st.session_state.setdefault("_booted", False)
+st.session_state.setdefault("_clear_confirm", False)
+if (not st.session_state["_booted"] and has_saved_project()
+        and not st.session_state.get("lines")):
+    try:
+        _saved = json.loads(AUTOSAVE_JSON.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        _saved = {}
+    _n_lines = len(_saved.get("lines") or [])
+    _n_imgs = len(_saved.get("image_idx") or [])
+    _has_video = bool(_saved.get("long_video"))
+    st.warning(
+        f"💾 Pichla project mila — {_n_lines} lines, {_n_imgs} images"
+        + (" — video bhi bani hui hai ✅" if _has_video else "")
+        + ". Wahi se continue karo, ya clear karke naya shuru karo."
+    )
+    _rc1, _rc2 = st.columns(2)
+    with _rc1:
+        if st.button("▶️ Wahi se continue karo", type="primary"):
+            if load_project():
+                st.session_state["_booted"] = True
+                st.success("Project wapas load ho gaya ✅")
+                st.rerun()
+            else:
+                st.error("Save load nahi ho saka — naya shuru karo.")
+    with _rc2:
+        if st.button("🗑️ Clear karke naya shuru karo"):
+            st.session_state["_clear_confirm"] = True
+    if st.session_state["_clear_confirm"]:
+        st.error("⚠️ Pakka? Pichla project hamesha ke liye delete ho jayega.")
+        _cc1, _cc2 = st.columns(2)
+        with _cc1:
+            if st.button("Haan, sab clear karo", type="primary"):
+                clear_saved_project()
+                st.session_state["_booted"] = True
+                st.session_state["_clear_confirm"] = False
+                st.rerun()
+        with _cc2:
+            if st.button("Rehne do"):
+                st.session_state["_clear_confirm"] = False
+                st.rerun()
+else:
+    st.session_state["_booted"] = True
 
 VOICE_CHOICES = {
     "Christopher (Signature Narrator)": "en-US-ChristopherNeural",
@@ -85,6 +248,7 @@ def do_voiceover(lines, voice_id, whisper_mode, workdir, key_prefix=""):
         )
         st.session_state["voice_path"] = mp3
         st.session_state["timings"] = timings
+        save_project()
         bar.progress(1.0, text="Ho gaya! ✅")
         st.success(f"Voiceover tayyar — {len(lines)} lines, "
                    f"{timings[-1]['end']:.1f}s audio ✅")
@@ -116,8 +280,12 @@ if go_voice:
     if not lines:
         st.error("Script khaali hai — pehle lines likho.")
     else:
+        reset_autosave_disk()  # naya project = purana save clear
         st.session_state["lines"] = lines
-        tmp = Path(tempfile.mkdtemp(prefix="horror_studio_"))
+        tmp = AUTOSAVE_DIR / "work"
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        tmp.mkdir(parents=True, exist_ok=True)
         st.session_state["workdir"] = str(tmp)
         st.session_state["images"] = {}
         st.session_state["img_src"] = {}
@@ -125,8 +293,10 @@ if go_voice:
         st.session_state["long_video"] = None
         st.session_state["shorts"] = []
         st.session_state["thumb_path"] = None
+        st.session_state["thumb_words"] = ""
         st.session_state["meta"] = None
         st.session_state["dubs"] = {}
+        st.session_state["render_cfg"] = None
         do_voiceover(lines, VOICE_CHOICES[voice_name], whisper_mode, tmp)
 
 if st.session_state["voice_path"]:
@@ -169,6 +339,8 @@ else:
                 st.session_state["images"][i] = data
                 st.session_state["img_src"][i] = "ai"
                 st.session_state["img_seeds"][i] = seed
+                _write_image_to_disk(i, data)
+                save_project()  # har image ke baad save — beech me ruke to wahi se
                 ok += 1
             except Exception as e:  # noqa: BLE001
                 fail.append(i + 1)
@@ -195,11 +367,14 @@ else:
                     if st.button("🔄 Dobara", key=f"regen_{i}"):
                         try:
                             seed = st.session_state["img_seeds"].get(i, 1) + 913
-                            st.session_state["images"][i] = image_gen.generate_image(
+                            data = image_gen.generate_image(
                                 image_gen.horror_prompt(line), seed=seed,
                                 model=img_model)
+                            st.session_state["images"][i] = data
                             st.session_state["img_src"][i] = "ai"
                             st.session_state["img_seeds"][i] = seed
+                            _write_image_to_disk(i, data)
+                            save_project()
                             st.rerun()
                         except Exception as e:  # noqa: BLE001
                             st.error(f"Fail: {e}")
@@ -207,8 +382,11 @@ else:
                     up = st.file_uploader("📤 Upload", type=["jpg", "jpeg", "png", "webp"],
                                           key=f"up_{i}", label_visibility="collapsed")
                     if up is not None:
-                        st.session_state["images"][i] = up.getvalue()
+                        data = up.getvalue()
+                        st.session_state["images"][i] = data
                         st.session_state["img_src"][i] = "upload"
+                        _write_image_to_disk(i, data)
+                        save_project()
                         st.rerun()
                 if pexels_key:
                     if st.button("📷 Stock photo", key=f"stock_{i}"):
@@ -218,9 +396,11 @@ else:
                             res = image_gen.pexels_search(
                                 f"horror dark {kw}", pexels_key, per_page=1)
                             if res:
-                                st.session_state["images"][i] = image_gen.download_url(
-                                    res[0]["url"])
+                                data = image_gen.download_url(res[0]["url"])
+                                st.session_state["images"][i] = data
                                 st.session_state["img_src"][i] = "stock"
+                                _write_image_to_disk(i, data)
+                                save_project()
                                 st.rerun()
                             else:
                                 st.warning("Stock nahi mila.")
@@ -326,6 +506,7 @@ else:
                 "captions": captions_on, "shorts": cfg["shorts"],
                 "music": bool(music_path),
             }
+            save_project()
             bar.progress(1.0, text="Ho gaya! ✅")
             st.success("Video tayyar! ✅ Neeche dekho aur download karo.")
         except Exception as e:  # noqa: BLE001
@@ -361,6 +542,7 @@ if st.session_state["long_video"] and st.session_state["images"]:
                 st.session_state["lines"], img_list, out)
             st.session_state["thumb_path"] = str(out)
             st.session_state["thumb_words"] = words
+            save_project()
             st.success("Thumbnail tayyar ✅")
         except Exception as e:  # noqa: BLE001
             st.error(f"Thumbnail fail: {e}")
@@ -375,6 +557,7 @@ if st.session_state["long_video"] and st.session_state["images"]:
         meta = metadata_gen.make_metadata(
             st.session_state["lines"], st.session_state["thumb_words"])
         st.session_state["meta"] = meta
+        save_project()
     if st.session_state["meta"]:
         meta = st.session_state["meta"]
         st.text_input("Title (copy karo)", meta["title"])
@@ -444,6 +627,7 @@ if st.session_state["long_video"] and st.session_state["images"]:
             }
             bar.progress(1.0, text="Ho gaya! ✅")
             st.success(f"{dub_mod.DUB_VOICES[lang_key]['label']} dub tayyar ✅")
+            save_project()
             st.rerun()
         except Exception as e:  # noqa: BLE001
             st.error(f"Dub fail: {e}")
@@ -464,3 +648,23 @@ else:
     st.info("Pehle final video banao (step 3) — phir dub.")
 
 st.caption("💡 Tip: Horror Voice Studio wali voice yahin banti hai — alag app kholne ki zaroorat nahi.")
+
+# ================= Project save / clear =================
+with st.expander("⚙️ Project: save / naya shuru"):
+    st.caption("💾 Har step ke baad project auto-save hota hai — app band karke dobara kholo to wahi se continue hoga. Clear sirf tumhare button se hoga, khud kuch delete nahi hota.")
+    st.caption("ℹ️ Note: Streamlit ka server restart ho to save khatam ho sakta hai — is liye final video download karke zaroor rakh lo.")
+    st.session_state.setdefault("_clear_confirm2", False)
+    if st.button("🗑️ Naya project shuru karo (sab kuch clear)"):
+        st.session_state["_clear_confirm2"] = True
+    if st.session_state["_clear_confirm2"]:
+        st.error("⚠️ Pakka? Saara project (script, voiceover, images, video) delete ho jayega.")
+        _bc1, _bc2 = st.columns(2)
+        with _bc1:
+            if st.button("Haan, sab clear karo", key="clear_yes", type="primary"):
+                clear_saved_project()
+                st.session_state["_clear_confirm2"] = False
+                st.rerun()
+        with _bc2:
+            if st.button("Rehne do", key="clear_no"):
+                st.session_state["_clear_confirm2"] = False
+                st.rerun()
