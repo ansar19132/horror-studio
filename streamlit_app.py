@@ -311,10 +311,106 @@ def parse_shorts(text):
     return shorts
 
 
+def run_auto_pipeline():
+    """🤖 Auto Pilot: ek click me script -> voiceover -> images -> video.
+
+    Har step complete hote hi agla khud start hota hai — kuch dabane ki
+    zaroorat nahi. Beech me ruke to wahi panel se manually continue karo.
+    """
+    st.header("🤖 Auto Pilot chal raha hai...")
+    st.caption("Step complete hote hi agla khud start hoga. Roko mat — "
+               "kuch minute lag sakte hain.")
+    lines = current_script_lines()
+    if not lines:
+        st.error("Script khaali hai — pehle 📝 Script panel me likho.")
+        return
+
+    # ---- step 1/3: voiceover ----
+    st.subheader("1/3 — 🎙 Voiceover")
+    reset_autosave_disk()
+    st.session_state["lines"] = lines
+    tmp = AUTOSAVE_DIR / "work"
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    tmp.mkdir(parents=True, exist_ok=True)
+    st.session_state["workdir"] = str(tmp)
+    for k, v in {"images": {}, "img_src": {}, "img_seeds": {},
+                 "long_video": None, "shorts": [],
+                 "thumb_path": None, "thumb_words": "",
+                 "gemini_titles": None, "thumb_ai_path": None,
+                 "meta": None, "dubs": {}, "render_cfg": None}.items():
+        st.session_state[k] = v
+    vname = st.session_state.get("voice_sel_name", list(VOICE_CHOICES)[0])
+    do_voiceover(lines, VOICE_CHOICES[vname],
+                 st.session_state.get("whisper_mode", True), tmp)
+    if not st.session_state["voice_path"]:
+        st.error("Voiceover fail — Auto Pilot ruk gaya.")
+        return
+
+    # ---- step 2/3: images ----
+    st.subheader("2/3 — 🖼 Images")
+    bar = st.progress(0, text="Images ban rahi hain...")
+    for i, line in enumerate(lines):
+        try:
+            seed = 1000 + i * 77
+            data = image_gen.generate_image(
+                image_gen.horror_prompt(line), seed=seed, model="flux")
+            st.session_state["images"][i] = data
+            st.session_state["img_src"][i] = "ai"
+            st.session_state["img_seeds"][i] = seed
+            _write_image_to_disk(i, data)
+        except Exception as e:  # noqa: BLE001
+            st.warning(f"Clip {i + 1} fail: {e} — baad me 🖼 Images panel se dobara banao")
+        bar.progress((i + 1) / len(lines),
+                     text=f"Image {i + 1}/{len(lines)}")
+    save_project()
+
+    # ---- step 3/3: render ----
+    st.subheader("3/3 — 🎞 Video render")
+    workdir = Path(st.session_state["workdir"])
+    music_path = MUSIC_BUNDLED if MUSIC_BUNDLED.exists() else None
+    proj = build_project(lines, st.session_state["voice_path"],
+                         st.session_state["images"], music_path,
+                         workdir, "project")
+    cfg = dict(horror_edit.DEFAULT_CONFIG)
+    cfg["delogo_idx"] = {i for i, s in st.session_state["img_src"].items()
+                         if s == "ai"}
+    bar2 = st.progress(0, text="Render ho raha hai...")
+    n_clips = len(lines)
+    try:
+        with st.status("Video render ho rahi hai...", expanded=True):
+            long_out, shorts_made = horror_edit.run_pipeline(
+                str(proj), cfg, model="tiny",
+                progress_cb=lambda p: bar2.progress(
+                    p, text=f"Clip {min(int(p * n_clips) + 1, n_clips)}/{n_clips}"),
+                captions=True, language="en",
+            )
+        st.session_state["long_video"] = str(long_out)
+        st.session_state["shorts"] = [str(s) for s in shorts_made]
+        st.session_state["render_cfg"] = {
+            "captions": True, "shorts": cfg["shorts"],
+            "music": bool(music_path),
+        }
+        save_project()
+        bar2.progress(1.0, text="Ho gaya! ✅")
+        st.success("🎉 Auto Pilot complete! Video tayyar — "
+                   "🎞 Edit & Video panel me dekho.")
+        st.balloons()
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Render fail: {e}")
+
+
 # ============================ SIDEBAR ============================
 with st.sidebar:
     st.title("🎃 Horror Studio")
     st.caption("CapCut-style panels — sab kuch ek jaga")
+    st.radio("🌓 Theme", ["🌙 Night", "🌞 Day"], key="app_theme",
+             horizontal=True)
+    if st.button("🤖 Auto: Script → Video", type="primary",
+                 help="Ek click — voiceover, images aur final video khud ban jayenge"):
+        st.session_state["auto_run"] = True
+        st.rerun()
+    st.divider()
     step = st.radio("Panels", STEPS, key="nav_step")
 
     st.divider()
@@ -381,6 +477,17 @@ with st.sidebar:
 st.title("🎃 Horror Studio")
 st.caption("Script → voiceover → images → final video. Sidebar se panel badlo.")
 
+# day theme (night default config.toml se aata hai)
+if st.session_state.get("app_theme") == "🌞 Day":
+    st.markdown("""<style>
+    .stApp { background-color: #f4f4f5; }
+    section[data-testid="stSidebar"] { background-color: #ffffff; }
+    .stApp h1, .stApp h2, .stApp h3, .stApp p, .stApp span,
+    .stApp div, .stApp label, .stApp caption { color: #18181b; }
+    .stTextInput input, .stTextArea textarea { background-color: #ffffff; color: #18181b; }
+    .stRadio div[role="radiogroup"] label { color: #18181b; }
+    </style>""", unsafe_allow_html=True)
+
 # resume banner
 st.session_state.setdefault("_booted", False)
 st.session_state.setdefault("_clear_confirm", False)
@@ -425,6 +532,12 @@ if (not st.session_state["_booted"] and has_saved_project()
                 st.rerun()
 else:
     st.session_state["_booted"] = True
+
+# 🤖 Auto Pilot — ek click me saare steps
+st.session_state.setdefault("auto_run", False)
+if st.session_state.pop("auto_run", False):
+    run_auto_pipeline()
+    st.divider()
 
 
 # ============================ PANELS ============================
@@ -611,6 +724,9 @@ def panel_edit():
             fx_letterbox = st.checkbox("🎬 Letterbox (cinematic bars)", value=True)
             fx_flash = st.checkbox("⚡ Scare par flash-cut + red flash", value=True)
             captions_on = st.checkbox("💬 Captions (horror karaoke)", value=True)
+            hl_intro = st.checkbox("⚡ Highlight intro (20s teaser @1.65x, start me)",
+                                   value=True,
+                                   help="Video ka sab se interesting 20s hissa tez karke shuru me lagao")
         with c3:
             trans_speed = st.selectbox("Transition style", ["Smooth", "Snappy"],
                                        index=0)
@@ -646,6 +762,7 @@ def panel_edit():
         cfg["shock_flash"] = fx_flash
         cfg["delogo_idx"] = {i for i, s in st.session_state["img_src"].items()
                              if s == "ai"}
+        cfg["highlight_intro"] = hl_intro
         if trans_speed == "Snappy":
             cfg["xfade_duration"] = 0.25
         try:
