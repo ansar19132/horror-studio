@@ -21,6 +21,7 @@ import horror_edit
 import image_gen
 import thumbnail_gen
 import metadata_gen
+import gemini_helper
 import dub as dub_mod
 from horror_voice import engine as voice_engine
 from horror_voice.script_parser import parse_script
@@ -46,6 +47,7 @@ for k, v in {
     "long_video": None, "shorts": [],
     "thumb_path": None, "thumb_words": "",
     "meta": None,
+    "gemini_titles": None, "thumb_ai_path": None,
     "dubs": {},        # lang_key -> {"video": path, "shorts": [...], "voice": path}
 }.items():
     st.session_state.setdefault(k, v)
@@ -64,7 +66,8 @@ AUTOSAVE_IMG_DIR.mkdir(exist_ok=True)
 
 SAVE_KEYS = ["lines", "voice_path", "timings", "img_src", "img_seeds",
              "workdir", "render_cfg", "long_video", "shorts",
-             "thumb_path", "thumb_words", "meta", "dubs"]
+             "thumb_path", "thumb_words", "meta", "dubs",
+             "gemini_titles", "thumb_ai_path"]
 
 
 def _write_image_to_disk(i, data):
@@ -161,6 +164,7 @@ def clear_saved_project():
         "long_video": None, "shorts": [],
         "thumb_path": None, "thumb_words": "",
         "meta": None, "dubs": {},
+        "gemini_titles": None, "thumb_ai_path": None,
     }.items():
         st.session_state[k] = v
 
@@ -294,6 +298,8 @@ if go_voice:
         st.session_state["shorts"] = []
         st.session_state["thumb_path"] = None
         st.session_state["thumb_words"] = ""
+        st.session_state["gemini_titles"] = None
+        st.session_state["thumb_ai_path"] = None
         st.session_state["meta"] = None
         st.session_state["dubs"] = {}
         st.session_state["render_cfg"] = None
@@ -580,7 +586,53 @@ if st.session_state["shorts"]:
 st.header("4️⃣ Thumbnail + Upload Metadata")
 
 if st.session_state["long_video"] and st.session_state["images"]:
-    if st.button("🖼️ Thumbnail banao", type="primary"):
+    gemini_key = st.text_input(
+        "🔑 Gemini API key (free — aistudio.google.com/apikey se lo)",
+        type="password",
+        help="Key sirf isi session me rehti hai — kahin save nahi hoti. "
+             "Is se AI titles aur AI thumbnail bante hain.")
+
+    g1, g2 = st.columns(2)
+    with g1:
+        if st.button("✨ Gemini se Titles banao", disabled=not gemini_key,
+                     help="Pehle Gemini API key dalo"):
+            try:
+                with st.spinner("Gemini titles soch raha hai..."):
+                    titles = gemini_helper.generate_titles(
+                        gemini_key, st.session_state["lines"])
+                st.session_state["gemini_titles"] = titles
+                save_project()
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Gemini fail: {e}")
+    with g2:
+        if st.button("🎨 Gemini se AI Thumbnail", disabled=not gemini_key,
+                     help="Pehle Gemini API key dalo"):
+            try:
+                with st.spinner("Gemini thumbnail bana raha hai... (1-2 min lag sakte hain)"):
+                    img_bytes = gemini_helper.generate_thumbnail(
+                        gemini_key, st.session_state["lines"],
+                        st.session_state.get("thumb_words", ""))
+                out = Path(st.session_state["workdir"]) / "thumbnail_gemini.jpg"
+                out.write_bytes(img_bytes)
+                st.session_state["thumb_ai_path"] = str(out)
+                save_project()
+                st.success("AI Thumbnail tayyar ✅")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Gemini fail: {e}")
+
+    if st.session_state.get("gemini_titles"):
+        pick = st.radio("Gemini ke titles — jo pasand aaye use chuno:",
+                        st.session_state["gemini_titles"])
+        if st.button("✅ Is title ko lagao"):
+            if st.session_state.get("meta"):
+                st.session_state["meta"]["title"] = pick
+            else:
+                st.session_state["meta"] = {"title": pick,
+                                            "description": "", "tags": []}
+            save_project()
+            st.success("Title laga diya ✅ — neeche metadata me dekho")
+
+    if st.button("🖼️ Thumbnail banao (simple wala)", type="primary"):
         try:
             img_list = [st.session_state["images"][i]
                         for i in range(len(st.session_state["lines"]))]
@@ -594,11 +646,22 @@ if st.session_state["long_video"] and st.session_state["images"]:
         except Exception as e:  # noqa: BLE001
             st.error(f"Thumbnail fail: {e}")
 
-    if st.session_state["thumb_path"]:
-        st.image(st.session_state["thumb_path"], width=480)
-        with open(st.session_state["thumb_path"], "rb") as f:
-            st.download_button("⬇️ Thumbnail download karo", f,
-                               file_name="thumbnail.jpg", mime="image/jpeg")
+    t1, t2 = st.columns(2)
+    with t1:
+        if st.session_state["thumb_path"]:
+            st.caption("Simple thumbnail")
+            st.image(st.session_state["thumb_path"], use_container_width=True)
+            with open(st.session_state["thumb_path"], "rb") as f:
+                st.download_button("⬇️ Simple download karo", f,
+                                   file_name="thumbnail.jpg", mime="image/jpeg")
+    with t2:
+        if st.session_state.get("thumb_ai_path"):
+            st.caption("✨ Gemini AI thumbnail")
+            st.image(st.session_state["thumb_ai_path"], use_container_width=True)
+            with open(st.session_state["thumb_ai_path"], "rb") as f:
+                st.download_button("⬇️ AI thumbnail download karo", f,
+                                   file_name="thumbnail_ai.jpg",
+                                   mime="image/jpeg", key="dl_thumb_ai")
 
     if st.button("📝 Title / Description / Tags banao"):
         meta = metadata_gen.make_metadata(
