@@ -1,15 +1,18 @@
 """Horror Studio — complete horror video tool (Streamlit).
 
-One pipeline: script -> voiceover (built-in voice tool) -> AI images ->
-auto-edited horror video with pro transitions, effects, captions.
-Plus: thumbnail, upload metadata, multi-language dubs, bundled music.
+CapCut-style layout: left sidebar me saare panels (Script, Voice, Images,
+Edit & Video, Thumbnail, Metadata, Dubs) + Gemini key manager. Beech me
+har panel ka apna frame — preview, timeline, live studio.
+
+One pipeline: script -> voiceover -> AI images -> auto-edited horror video
+with pro transitions, effects, captions. Plus: thumbnail, upload metadata,
+multi-language dubs, bundled music.
 
 Deploy: Streamlit Community Cloud.
 """
 import json
 import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 APP_DIR = Path(__file__).parent
@@ -24,7 +27,6 @@ import metadata_gen
 import gemini_helper
 import dub as dub_mod
 from horror_voice import engine as voice_engine
-from horror_voice.script_parser import parse_script
 
 # bundled font for captions
 horror_edit.FONT_BOLD = str(APP_DIR / "fonts" / "DejaVuSans-Bold.ttf")
@@ -33,12 +35,11 @@ horror_edit.FONTS_DIR = str(APP_DIR / "fonts")
 MUSIC_BUNDLED = APP_DIR / "music" / "dark_ambient.mp3"
 
 st.set_page_config(page_title="Horror Studio", layout="wide")
-st.title("🎃 Horror Studio — complete horror video tool")
-st.write("Script likho → voiceover bane → images bane → final video ready. Sab ek jaga.")
 
 # ---------------- session state ----------------
 for k, v in {
-    "lines": [], "voice_path": None, "timings": None,
+    "lines": [], "script_text": "",
+    "voice_path": None, "timings": None,
     "images": {},      # idx -> bytes
     "img_src": {},     # idx -> "ai" | "upload" | "stock"
     "img_seeds": {},
@@ -65,8 +66,8 @@ PROJECTS_DIR.mkdir(exist_ok=True)
 AUTOSAVE_DIR.mkdir(exist_ok=True)
 AUTOSAVE_IMG_DIR.mkdir(exist_ok=True)
 
-SAVE_KEYS = ["lines", "voice_path", "timings", "img_src", "img_seeds",
-             "workdir", "render_cfg", "long_video", "shorts",
+SAVE_KEYS = ["lines", "script_text", "voice_path", "timings", "img_src",
+             "img_seeds", "workdir", "render_cfg", "long_video", "shorts",
              "thumb_path", "thumb_words", "meta", "dubs",
              "gemini_titles", "thumb_ai_path"]
 
@@ -118,7 +119,6 @@ def load_project():
     for k in SAVE_KEYS:
         if k in data and data[k] is not None:
             st.session_state[k] = data[k]
-    # int keys JSON me string ban jate hain — wapas int karo
     for k in ("img_src", "img_seeds"):
         d = st.session_state.get(k) or {}
         try:
@@ -134,7 +134,6 @@ def load_project():
         except Exception:  # noqa: BLE001
             pass
     st.session_state["images"] = images
-    # jo files ab mojood nahi, unke path hata do (crash se bacho)
     for k in ("voice_path", "long_video", "thumb_path"):
         p = st.session_state.get(k)
         if p and not Path(p).exists():
@@ -159,7 +158,8 @@ def clear_saved_project():
     """Full clear — sirf user ke clear button se call hota hai."""
     reset_autosave_disk()
     for k, v in {
-        "lines": [], "voice_path": None, "timings": None,
+        "lines": [], "script_text": "",
+        "voice_path": None, "timings": None,
         "images": {}, "img_src": {}, "img_seeds": {},
         "workdir": None, "render_cfg": None,
         "long_video": None, "shorts": [],
@@ -169,51 +169,6 @@ def clear_saved_project():
     }.items():
         st.session_state[k] = v
 
-
-# ---------------- resume banner ----------------
-st.session_state.setdefault("_booted", False)
-st.session_state.setdefault("_clear_confirm", False)
-if (not st.session_state["_booted"] and has_saved_project()
-        and not st.session_state.get("lines")):
-    try:
-        _saved = json.loads(AUTOSAVE_JSON.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        _saved = {}
-    _n_lines = len(_saved.get("lines") or [])
-    _n_imgs = len(_saved.get("image_idx") or [])
-    _has_video = bool(_saved.get("long_video"))
-    st.warning(
-        f"💾 Pichla project mila — {_n_lines} lines, {_n_imgs} images"
-        + (" — video bhi bani hui hai ✅" if _has_video else "")
-        + ". Wahi se continue karo, ya clear karke naya shuru karo."
-    )
-    _rc1, _rc2 = st.columns(2)
-    with _rc1:
-        if st.button("▶️ Wahi se continue karo", type="primary"):
-            if load_project():
-                st.session_state["_booted"] = True
-                st.success("Project wapas load ho gaya ✅")
-                st.rerun()
-            else:
-                st.error("Save load nahi ho saka — naya shuru karo.")
-    with _rc2:
-        if st.button("🗑️ Clear karke naya shuru karo"):
-            st.session_state["_clear_confirm"] = True
-    if st.session_state["_clear_confirm"]:
-        st.error("⚠️ Pakka? Pichla project hamesha ke liye delete ho jayega.")
-        _cc1, _cc2 = st.columns(2)
-        with _cc1:
-            if st.button("Haan, sab clear karo", type="primary"):
-                clear_saved_project()
-                st.session_state["_booted"] = True
-                st.session_state["_clear_confirm"] = False
-                st.rerun()
-        with _cc2:
-            if st.button("Rehne do"):
-                st.session_state["_clear_confirm"] = False
-                st.rerun()
-else:
-    st.session_state["_booted"] = True
 
 VOICE_CHOICES = {
     "Christopher (Signature Narrator)": "en-US-ChristopherNeural",
@@ -229,8 +184,11 @@ SUPERNATURAL_HINTS = [
     "blood", "midnight", "moon",
 ]
 
+STEPS = ["📝 Script", "🎙 Voice", "🖼 Images", "🎞 Edit & Video",
+         "🖼️ Thumbnail", "🏷 Metadata", "🌍 Dubs"]
 
-def do_voiceover(lines, voice_id, whisper_mode, workdir, key_prefix=""):
+
+def do_voiceover(lines, voice_id, whisper_mode, workdir):
     """Generate (or re-generate) the English voiceover."""
     manual = None
     if whisper_mode:
@@ -261,63 +219,11 @@ def do_voiceover(lines, voice_id, whisper_mode, workdir, key_prefix=""):
         st.error(f"Voiceover fail: {e}")
 
 
-# ================= STEP 1 — script + voiceover =================
-st.header("1️⃣ Script + Voiceover")
+def current_script_lines():
+    txt = st.session_state.get("script_text") or ""
+    ls = [l.strip() for l in txt.splitlines() if l.strip()]
+    return ls or list(st.session_state.get("lines") or [])
 
-with st.form("step1"):
-    script_text = st.text_area(
-        "Script (ek sentence per line — har line = ek clip)",
-        height=200,
-        placeholder="The house had been empty for forty years.\nNobody who entered ever came back.\nThen something screamed my name.",
-    )
-    col1, col2 = st.columns(2)
-    with col1:
-        voice_name = st.selectbox("Narrator voice", list(VOICE_CHOICES.keys()), index=0)
-    with col2:
-        whisper_mode = st.checkbox(
-            "Supernatural lines par auto-whisper", value=True,
-            help="Quoted aur paranormal lines whisper me — asli farq parega",
-        )
-    go_voice = st.form_submit_button("🎙️ Voiceover banao", type="primary")
-
-if go_voice:
-    lines = [l.strip() for l in script_text.splitlines() if l.strip()]
-    if not lines:
-        st.error("Script khaali hai — pehle lines likho.")
-    else:
-        reset_autosave_disk()  # naya project = purana save clear
-        st.session_state["lines"] = lines
-        tmp = AUTOSAVE_DIR / "work"
-        if tmp.exists():
-            shutil.rmtree(tmp)
-        tmp.mkdir(parents=True, exist_ok=True)
-        st.session_state["workdir"] = str(tmp)
-        st.session_state["images"] = {}
-        st.session_state["img_src"] = {}
-        st.session_state["img_seeds"] = {}
-        st.session_state["long_video"] = None
-        st.session_state["shorts"] = []
-        st.session_state["thumb_path"] = None
-        st.session_state["thumb_words"] = ""
-        st.session_state["gemini_titles"] = None
-        st.session_state["thumb_ai_path"] = None
-        st.session_state["meta"] = None
-        st.session_state["dubs"] = {}
-        st.session_state["render_cfg"] = None
-        do_voiceover(lines, VOICE_CHOICES[voice_name], whisper_mode, tmp)
-
-if st.session_state["voice_path"]:
-    st.audio(st.session_state["voice_path"])
-    c1, c2 = st.columns(2)
-    with c1:
-        with open(st.session_state["voice_path"], "rb") as f:
-            st.download_button("⬇️ Voiceover MP3", f, file_name="voiceover.mp3",
-                               mime="audio/mpeg")
-    with c2:
-        if st.button("🔄 Voiceover dobara banao"):
-            do_voiceover(st.session_state["lines"],
-                         VOICE_CHOICES[voice_name], whisper_mode,
-                         Path(st.session_state["workdir"]))
 
 def _paint_line_status(slot, i, line):
     """Left pane: ek line ka live status."""
@@ -329,8 +235,10 @@ def _paint_line_status(slot, i, line):
     slot.caption(f"{icon}{tag} **{i + 1}.** {line[:80]}")
 
 
-def _paint_image_actions(i, line, img_model, pexels_key):
+def _paint_image_actions(i, line):
     """Right pane: ek image ke neeche correction buttons."""
+    img_model = st.session_state.get("img_model", "flux")
+    pexels_key = st.session_state.get("pexels_key", "")
     b1, b2 = st.columns(2)
     with b1:
         if st.button("🔄 Dobara", key=f"regen_{i}"):
@@ -378,81 +286,6 @@ def _paint_image_actions(i, line, img_model, pexels_key):
                 st.error(f"Stock fail: {e}")
 
 
-# ================= STEP 2 — images =================
-st.header("2️⃣ Images (AI khud banayega)")
-
-lines = st.session_state["lines"]
-if not lines:
-    st.info("Pehle step 1 me voiceover banao — phir images.")
-else:
-    colA, colB = st.columns(2)
-    with colA:
-        img_model = st.selectbox("Image model", ["flux", "turbo"], index=0,
-                                 help="flux = behtar quality, turbo = tez")
-    with colB:
-        pexels_key = st.text_input("Pexels API key (optional — stock photos ke liye)",
-                                   type="password",
-                                   help="pexels.com se free key — stock photo fallback ke liye")
-
-    go_images = st.button("🖼️ Sab images banao (AI)", type="primary")
-
-    # ---------- live studio: ek taraf script, doosri taraf images ----------
-    st.subheader("🎬 Live Studio")
-    overall_slot = st.empty()
-    _done0 = sum(1 for i in range(len(lines)) if st.session_state["images"].get(i))
-    overall_slot.caption(f"📊 {_done0}/{len(lines)} images tayyar")
-    pane_script, pane_visual = st.columns([1, 1.15])
-    status_slots, img_slots = {}, {}
-    with pane_script:
-        st.caption("📜 Script + live status")
-        for i, line in enumerate(lines):
-            status_slots[i] = st.empty()
-            _paint_line_status(status_slots[i], i, line)
-    with pane_visual:
-        st.caption("🖼️ Images — bante hi yahan nazar aayengi")
-        vcols = st.columns(2)
-        for i, line in enumerate(lines):
-            with vcols[i % 2]:
-                st.caption(f"🎞️ Clip {i + 1}: {line[:55]}")
-                img_slots[i] = st.empty()
-                data = st.session_state["images"].get(i)
-                if data:
-                    img_slots[i].image(data, use_container_width=True)
-                else:
-                    img_slots[i].caption("⏳ Abhi nahi bani")
-                _paint_image_actions(i, line, img_model, pexels_key)
-
-    if go_images:
-        ok, fail, done = 0, [], _done0
-        for i, line in enumerate(lines):
-            if st.session_state["images"].get(i):
-                continue  # bani hui skip — dobara nahi banao
-            status_slots[i].caption(f"🎨 **{i + 1}.** {line[:80]} — ban rahi hai...")
-            img_slots[i].caption("🎨 Ban rahi hai...")
-            try:
-                seed = 1000 + i * 77
-                data = image_gen.generate_image(
-                    image_gen.horror_prompt(line), seed=seed, model=img_model)
-                st.session_state["images"][i] = data
-                st.session_state["img_src"][i] = "ai"
-                st.session_state["img_seeds"][i] = seed
-                _write_image_to_disk(i, data)
-                save_project()  # har image ke baad save — beech me ruke to wahi se
-                ok += 1
-                done += 1
-                _paint_line_status(status_slots[i], i, line)
-                img_slots[i].image(data, use_container_width=True)
-                overall_slot.caption(f"📊 {done}/{len(lines)} images tayyar")
-            except Exception as e:  # noqa: BLE001
-                fail.append(i + 1)
-                status_slots[i].caption(f"❌ **{i + 1}.** {line[:80]} — fail")
-                img_slots[i].caption("❌ Nahi ban saki — dobara try karo")
-        if fail:
-            st.warning(f"Ye clips ki images nahi ban saki: {fail} — neeche 🔄 Dobara dabao ya upload karo.")
-        else:
-            st.success(f"{ok} nayi images tayyar ✅ — sab {done}/{len(lines)} ready")
-
-
 def build_project(lines, voice_path, images, music_path, workdir, name="project"):
     """Assemble a render project folder. Returns proj Path."""
     proj = Path(workdir) / name
@@ -478,13 +311,297 @@ def parse_shorts(text):
     return shorts
 
 
-# ================= STEP 3 — edit + render =================
-st.header("3️⃣ Edit + Final Video")
+# ============================ SIDEBAR ============================
+with st.sidebar:
+    st.title("🎃 Horror Studio")
+    st.caption("CapCut-style panels — sab kuch ek jaga")
+    step = st.radio("Panels", STEPS, key="nav_step")
 
-if not st.session_state["images"] or len(st.session_state["images"]) != len(lines):
-    st.info("Sab clips ki images tayyar karo (step 2) — phir video banegi.")
+    st.divider()
+    # project status
+    _lines = st.session_state.get("lines") or []
+    _n_img = sum(1 for i in range(len(_lines))
+                 if st.session_state["images"].get(i))
+    st.caption(
+        f"🎙 {'✅' if st.session_state['voice_path'] else '⬜'}"
+        f" · 🖼 {_n_img}/{len(_lines)}"
+        f" · 🎞 {'✅' if st.session_state['long_video'] else '⬜'}"
+        f" · 🖼️ {'✅' if st.session_state['thumb_path'] or st.session_state.get('thumb_ai_path') else '⬜'}"
+    )
+
+    st.divider()
+    # Gemini key manager — har panel se reachable
+    st.subheader("🔑 Gemini API")
+    st.link_button("🆓 Free API key lo",
+                   "https://aistudio.google.com/apikey",
+                   help="Google AI Studio khulega — 'Get API key' dabao, bilkul free")
+    st.text_area("Keys (har line me ek — ek ya zyada accounts ki)",
+                 height=70, key="gemini_keys_raw",
+                 help="Keys sirf isi session me rehti hain — save nahi hotin.")
+    if st.button("🔌 Connect",
+                 disabled=not (st.session_state.get("gemini_keys_raw") or "").strip()):
+        keys = [k.strip() for k in
+                (st.session_state.get("gemini_keys_raw") or "").splitlines()
+                if k.strip()]
+        working = []
+        for k in keys:
+            ok, msg = gemini_helper.test_key(k)
+            mark = "✅" if ok else "❌"
+            st.caption(f"{mark} `...{k[-4:]}` — {msg}")
+            if ok:
+                working.append(k)
+        st.session_state["gemini_keys_ok"] = working
+        if working:
+            st.success(f"{len(working)}/{len(keys)} connected ✅")
+        else:
+            st.error("Koi key connect nahi hui")
+    _conn = st.session_state.get("gemini_keys_ok") or []
+    if _conn:
+        st.caption(f"🔌 {len(_conn)} key(s) connected")
+
+    st.divider()
+    with st.expander("⚙️ Project"):
+        st.caption("💾 Har step ke baad auto-save. Server restart par save "
+                   "khatam ho sakta hai — final video download karke rakho.")
+        st.session_state.setdefault("_clear_confirm2", False)
+        if st.button("🗑️ Naya project (sab clear)"):
+            st.session_state["_clear_confirm2"] = True
+        if st.session_state["_clear_confirm2"]:
+            st.error("⚠️ Pakka? Sab kuch delete ho jayega.")
+            if st.button("Haan, sab clear karo", key="clear_yes",
+                         type="primary"):
+                clear_saved_project()
+                st.session_state["_clear_confirm2"] = False
+                st.rerun()
+            if st.button("Rehne do", key="clear_no"):
+                st.session_state["_clear_confirm2"] = False
+                st.rerun()
+
+# ============================ MAIN ============================
+st.title("🎃 Horror Studio")
+st.caption("Script → voiceover → images → final video. Sidebar se panel badlo.")
+
+# resume banner
+st.session_state.setdefault("_booted", False)
+st.session_state.setdefault("_clear_confirm", False)
+if (not st.session_state["_booted"] and has_saved_project()
+        and not st.session_state.get("lines")):
+    try:
+        _saved = json.loads(AUTOSAVE_JSON.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        _saved = {}
+    _n_lines = len(_saved.get("lines") or [])
+    _n_imgs = len(_saved.get("image_idx") or [])
+    _has_video = bool(_saved.get("long_video"))
+    st.warning(
+        f"💾 Pichla project mila — {_n_lines} lines, {_n_imgs} images"
+        + (" — video bhi bani hui hai ✅" if _has_video else "")
+        + ". Wahi se continue karo, ya clear karke naya shuru karo."
+    )
+    _rc1, _rc2 = st.columns(2)
+    with _rc1:
+        if st.button("▶️ Wahi se continue karo", type="primary"):
+            if load_project():
+                st.session_state["_booted"] = True
+                st.success("Project wapas load ho gaya ✅")
+                st.rerun()
+            else:
+                st.error("Save load nahi ho saka — naya shuru karo.")
+    with _rc2:
+        if st.button("🗑️ Clear karke naya shuru karo"):
+            st.session_state["_clear_confirm"] = True
+    if st.session_state["_clear_confirm"]:
+        st.error("⚠️ Pakka? Pichla project hamesha ke liye delete ho jayega.")
+        _cc1, _cc2 = st.columns(2)
+        with _cc1:
+            if st.button("Haan, sab clear karo", type="primary"):
+                clear_saved_project()
+                st.session_state["_booted"] = True
+                st.session_state["_clear_confirm"] = False
+                st.rerun()
+        with _cc2:
+            if st.button("Rehne do"):
+                st.session_state["_clear_confirm"] = False
+                st.rerun()
 else:
-    with st.form("step3"):
+    st.session_state["_booted"] = True
+
+
+# ============================ PANELS ============================
+def panel_script():
+    st.header("📝 Script")
+    if st.session_state.get("lines") and not st.session_state.get("script_text"):
+        st.session_state["script_text"] = "\n".join(
+            st.session_state["lines"])
+    st.text_area("Script (ek sentence per line — har line = ek clip)",
+                 height=320, key="script_text",
+                 placeholder="The house had been empty for forty years.\n"
+                             "Nobody who entered ever came back.\n"
+                             "Then something screamed my name.")
+    n = len(current_script_lines())
+    st.caption(f"📊 {n} lines — har line ek clip banegi")
+
+
+def panel_voice():
+    st.header("🎙 Voiceover")
+    lines = current_script_lines()
+    if not lines:
+        st.info("Pehle 📝 Script panel me script likho.")
+        return
+    st.caption(f"📊 {len(lines)} lines")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.selectbox("Narrator voice", list(VOICE_CHOICES.keys()), index=0,
+                     key="voice_sel_name")
+    with c2:
+        st.checkbox("Supernatural lines par auto-whisper", value=True,
+                    key="whisper_mode",
+                    help="Quoted aur paranormal lines whisper me")
+    if st.button("🎙️ Voiceover banao", type="primary"):
+        reset_autosave_disk()
+        st.session_state["lines"] = lines
+        tmp = AUTOSAVE_DIR / "work"
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        tmp.mkdir(parents=True, exist_ok=True)
+        st.session_state["workdir"] = str(tmp)
+        for k, v in {"images": {}, "img_src": {}, "img_seeds": {},
+                     "long_video": None, "shorts": [],
+                     "thumb_path": None, "thumb_words": "",
+                     "gemini_titles": None, "thumb_ai_path": None,
+                     "meta": None, "dubs": {}, "render_cfg": None}.items():
+            st.session_state[k] = v
+        do_voiceover(lines, VOICE_CHOICES[st.session_state["voice_sel_name"]],
+                     st.session_state["whisper_mode"], tmp)
+    if st.session_state["voice_path"]:
+        st.audio(st.session_state["voice_path"])
+        c1, c2 = st.columns(2)
+        with c1:
+            with open(st.session_state["voice_path"], "rb") as f:
+                st.download_button("⬇️ Voiceover MP3", f,
+                                   file_name="voiceover.mp3",
+                                   mime="audio/mpeg")
+        with c2:
+            if st.button("🔄 Voiceover dobara banao"):
+                do_voiceover(st.session_state["lines"],
+                             VOICE_CHOICES[st.session_state["voice_sel_name"]],
+                             st.session_state["whisper_mode"],
+                             Path(st.session_state["workdir"]))
+
+
+def panel_images():
+    st.header("🖼 Images")
+    lines = st.session_state["lines"]
+    if not lines:
+        st.info("Pehle 🎙 Voice panel me voiceover banao.")
+        return
+    colA, colB = st.columns(2)
+    with colA:
+        st.selectbox("Image model", ["flux", "turbo"], index=0, key="img_model",
+                     help="flux = behtar quality, turbo = tez")
+    with colB:
+        st.text_input("Pexels API key (optional — stock photos ke liye)",
+                      type="password", key="pexels_key",
+                      help="pexels.com se free key — stock photo fallback ke liye")
+    st.button("🖼️ Sab images banao (AI)", type="primary", key="go_images")
+
+    st.subheader("🎬 Live Studio")
+    overall_slot = st.empty()
+    _done0 = sum(1 for i in range(len(lines))
+                 if st.session_state["images"].get(i))
+    overall_slot.caption(f"📊 {_done0}/{len(lines)} images tayyar")
+    pane_script, pane_visual = st.columns([1, 1.15])
+    status_slots, img_slots = {}, {}
+    with pane_script:
+        st.caption("📜 Script + live status")
+        for i, line in enumerate(lines):
+            status_slots[i] = st.empty()
+            _paint_line_status(status_slots[i], i, line)
+    with pane_visual:
+        st.caption("🖼️ Images — bante hi yahan nazar aayengi")
+        vcols = st.columns(2)
+        for i, line in enumerate(lines):
+            with vcols[i % 2]:
+                st.caption(f"🎞️ Clip {i + 1}: {line[:55]}")
+                img_slots[i] = st.empty()
+                data = st.session_state["images"].get(i)
+                if data:
+                    img_slots[i].image(data, use_container_width=True)
+                else:
+                    img_slots[i].caption("⏳ Abhi nahi bani")
+                _paint_image_actions(i, line)
+
+    if st.session_state.get("go_images"):
+        st.session_state["go_images"] = False
+        ok, fail, done = 0, [], _done0
+        for i, line in enumerate(lines):
+            if st.session_state["images"].get(i):
+                continue
+            status_slots[i].caption(f"🎨 **{i + 1}.** {line[:80]} — ban rahi hai...")
+            img_slots[i].caption("🎨 Ban rahi hai...")
+            try:
+                seed = 1000 + i * 77
+                data = image_gen.generate_image(
+                    image_gen.horror_prompt(line), seed=seed,
+                    model=st.session_state.get("img_model", "flux"))
+                st.session_state["images"][i] = data
+                st.session_state["img_src"][i] = "ai"
+                st.session_state["img_seeds"][i] = seed
+                _write_image_to_disk(i, data)
+                save_project()
+                ok += 1
+                done += 1
+                _paint_line_status(status_slots[i], i, line)
+                img_slots[i].image(data, use_container_width=True)
+                overall_slot.caption(f"📊 {done}/{len(lines)} images tayyar")
+            except Exception as e:  # noqa: BLE001
+                fail.append(i + 1)
+                status_slots[i].caption(f"❌ **{i + 1}.** {line[:80]} — fail")
+                img_slots[i].caption("❌ Nahi ban saki — dobara try karo")
+        if fail:
+            st.warning(f"Ye clips ki images nahi ban saki: {fail} — "
+                       "🔄 Dobara dabao ya upload karo.")
+        else:
+            st.success(f"{ok} nayi images tayyar ✅ — sab {done}/{len(lines)} ready")
+
+
+def panel_edit():
+    st.header("🎞 Edit & Video")
+    lines = st.session_state["lines"]
+    if not lines:
+        st.info("Pehle 🎙 Voice panel me voiceover banao.")
+        return
+
+    # preview frame
+    st.subheader("🖥 Preview")
+    if st.session_state["long_video"]:
+        st.video(st.session_state["long_video"])
+        with open(st.session_state["long_video"], "rb") as f:
+            st.download_button("⬇️ Final video download karo", f,
+                               file_name="horror_final.mp4",
+                               mime="video/mp4")
+    else:
+        st.info("Render ke baad final video yahan preview hogi.")
+
+    # timeline frame — saare clips ek jaga
+    with st.expander("🎞 Timeline — saare clips (image order)", expanded=False):
+        tcols = st.columns(6)
+        for i in range(len(lines)):
+            with tcols[i % 6]:
+                d = st.session_state["images"].get(i)
+                if d:
+                    st.image(d, caption=f"Clip {i + 1}",
+                             use_container_width=True)
+                else:
+                    st.caption(f"⬜ Clip {i + 1}")
+
+    st.divider()
+    if (not st.session_state["images"]
+            or len(st.session_state["images"]) != len(lines)):
+        st.info("Sab clips ki images tayyar karo (🖼 Images panel) — phir video banegi.")
+        return
+
+    with st.form("edit_form"):
         c1, c2, c3 = st.columns(3)
         with c1:
             fx_grade = st.checkbox("🎨 Horror grade (cold + dark)", value=True)
@@ -495,11 +612,12 @@ else:
             fx_flash = st.checkbox("⚡ Scare par flash-cut + red flash", value=True)
             captions_on = st.checkbox("💬 Captions (horror karaoke)", value=True)
         with c3:
-            trans_speed = st.selectbox("Transition style", ["Smooth", "Snappy"], index=0)
+            trans_speed = st.selectbox("Transition style", ["Smooth", "Snappy"],
+                                       index=0)
             music_opt = st.selectbox(
                 "🎵 Background music",
-                ["Built-in dark ambient (auto)", "Apni upload karo", "Koi music nahi"],
-                index=0)
+                ["Built-in dark ambient (auto)", "Apni upload karo",
+                 "Koi music nahi"], index=0)
             shorts_text = st.text_input("Shorts (line numbers: start,end; ...)",
                                         value="1,4")
         music_upload = None
@@ -526,7 +644,6 @@ else:
         cfg["vignette"] = fx_vignette
         cfg["letterbox"] = fx_letterbox
         cfg["shock_flash"] = fx_flash
-        # erase Pollinations watermark only on AI-generated images
         cfg["delogo_idx"] = {i for i, s in st.session_state["img_src"].items()
                              if s == "ai"}
         if trans_speed == "Snappy":
@@ -562,87 +679,97 @@ else:
             }
             save_project()
             bar.progress(1.0, text="Ho gaya! ✅")
-            st.success("Video tayyar! ✅ Neeche dekho aur download karo.")
+            st.success("Video tayyar! ✅ Oopar preview me dekho.")
+            st.rerun()
         except Exception as e:  # noqa: BLE001
             st.error(f"Render fail: {e}")
 
-if st.session_state["long_video"]:
-    st.subheader("🎬 Final video (16:9)")
-    st.video(st.session_state["long_video"])
-    with open(st.session_state["long_video"], "rb") as f:
-        st.download_button("⬇️ Final video download karo", f,
-                           file_name="horror_final.mp4", mime="video/mp4")
-if st.session_state["shorts"]:
-    st.subheader("📱 Shorts (9:16)")
-    cols = st.columns(3)
-    for i, sp in enumerate(st.session_state["shorts"]):
-        with cols[i % 3]:
-            st.video(sp)
-            with open(sp, "rb") as f:
-                st.download_button(f"⬇️ Short {i + 1}", f,
-                                   file_name=f"short_{i + 1}.mp4",
-                                   mime="video/mp4", key=f"dl_s_{i}")
+    if st.session_state["shorts"]:
+        st.subheader("📱 Shorts (9:16)")
+        cols = st.columns(3)
+        for i, sp in enumerate(st.session_state["shorts"]):
+            with cols[i % 3]:
+                st.video(sp)
+                with open(sp, "rb") as f:
+                    st.download_button(f"⬇️ Short {i + 1}", f,
+                                       file_name=f"short_{i + 1}.mp4",
+                                       mime="video/mp4", key=f"dl_s_{i}")
 
-# ================= STEP 4 — thumbnail + metadata =================
-st.header("4️⃣ Thumbnail + Upload Metadata")
 
-if st.session_state["long_video"] and st.session_state["images"]:
-    st.subheader("🔑 Gemini API Keys")
-    st.link_button("🆓 Free API key hasil karo",
-                   "https://aistudio.google.com/apikey",
-                   help="Google AI Studio khulega — wahan 'Get API key' dabao, bilkul free")
-    gemini_keys_raw = st.text_area(
-        "API keys yahan paste karo (har line me ek — ek account ki hon ya alag alag, jitni marzi)",
-        help="Keys sirf isi session me rehti hain — kahin save nahi hotin. "
-             "Zyada keys ka matlab zyada free limit.")
-    keys = [k.strip() for k in (gemini_keys_raw or "").splitlines() if k.strip()]
-
-    if st.button("🔌 Connect", disabled=not keys,
-                 help="Pehle oopar keys paste karo"):
-        working = []
-        for k in keys:
-            ok, msg = gemini_helper.test_key(k)
-            mark = "✅" if ok else "❌"
-            st.caption(f"{mark} `...{k[-4:]}` — {msg}")
-            if ok:
-                working.append(k)
-        st.session_state["gemini_keys_ok"] = working
-        if working:
-            st.success(f"{len(working)}/{len(keys)} key(s) connect ho gayin ✅")
-        else:
-            st.error("Koi key connect nahi hui — keys dobara check karo")
-
+def panel_thumbnail():
+    st.header("🖼️ Thumbnail")
+    lines = st.session_state["lines"]
+    if not (st.session_state["long_video"] and st.session_state["images"]):
+        st.info("Pehle 🎞 Edit & Video panel me final video banao.")
+        return
     connected = st.session_state.get("gemini_keys_ok") or []
-    if connected:
-        st.caption("🔌 Keys connected — ek ki limit khatam ho to agli key khud lag jayegi")
 
-    g1, g2 = st.columns(2)
-    with g1:
-        if st.button("✨ Gemini se Titles banao", disabled=not connected,
-                     help="Pehle oopar keys Connect karo"):
-            try:
-                with st.spinner("Gemini titles soch raha hai..."):
-                    titles = gemini_helper.generate_titles(
-                        connected, st.session_state["lines"])
-                st.session_state["gemini_titles"] = titles
-                save_project()
-            except Exception as e:  # noqa: BLE001
-                st.error(f"Gemini fail: {e}")
-    with g2:
-        if st.button("🎨 Gemini se AI Thumbnail", disabled=not connected,
-                     help="Pehle oopar keys Connect karo"):
-            try:
-                with st.spinner("Gemini thumbnail bana raha hai... (1-2 min lag sakte hain)"):
-                    img_bytes = gemini_helper.generate_thumbnail(
-                        connected, st.session_state["lines"],
-                        st.session_state.get("thumb_words", ""))
-                out = Path(st.session_state["workdir"]) / "thumbnail_gemini.jpg"
-                out.write_bytes(img_bytes)
-                st.session_state["thumb_ai_path"] = str(out)
-                save_project()
-                st.success("AI Thumbnail tayyar ✅")
-            except Exception as e:  # noqa: BLE001
-                st.error(f"Gemini fail: {e}")
+    if st.button("🖼️ Thumbnail banao (simple wala)", type="primary"):
+        try:
+            img_list = [st.session_state["images"][i]
+                        for i in range(len(lines))]
+            out = Path(st.session_state["workdir"]) / "thumbnail.jpg"
+            _, words = thumbnail_gen.generate_thumbnail_for_script(
+                lines, img_list, out)
+            st.session_state["thumb_path"] = str(out)
+            st.session_state["thumb_words"] = words
+            save_project()
+            st.success("Thumbnail tayyar ✅")
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Thumbnail fail: {e}")
+
+    if st.button("🎨 Gemini se AI Thumbnail", disabled=not connected,
+                 help="Sidebar me 🔑 Gemini keys Connect karo"):
+        try:
+            with st.spinner("Gemini thumbnail bana raha hai... (1-2 min)"):
+                img_bytes = gemini_helper.generate_thumbnail(
+                    connected, lines,
+                    st.session_state.get("thumb_words", ""))
+            out = Path(st.session_state["workdir"]) / "thumbnail_gemini.jpg"
+            out.write_bytes(img_bytes)
+            st.session_state["thumb_ai_path"] = str(out)
+            save_project()
+            st.success("AI Thumbnail tayyar ✅")
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Gemini fail: {e}")
+
+    t1, t2 = st.columns(2)
+    with t1:
+        if st.session_state["thumb_path"]:
+            st.caption("Simple thumbnail")
+            st.image(st.session_state["thumb_path"], use_container_width=True)
+            with open(st.session_state["thumb_path"], "rb") as f:
+                st.download_button("⬇️ Simple download karo", f,
+                                   file_name="thumbnail.jpg",
+                                   mime="image/jpeg")
+    with t2:
+        if st.session_state.get("thumb_ai_path"):
+            st.caption("✨ Gemini AI thumbnail")
+            st.image(st.session_state["thumb_ai_path"],
+                     use_container_width=True)
+            with open(st.session_state["thumb_ai_path"], "rb") as f:
+                st.download_button("⬇️ AI thumbnail download karo", f,
+                                   file_name="thumbnail_ai.jpg",
+                                   mime="image/jpeg", key="dl_thumb_ai")
+
+
+def panel_metadata():
+    st.header("🏷 Upload Metadata")
+    if not (st.session_state["long_video"] and st.session_state["images"]):
+        st.info("Pehle 🎞 Edit & Video panel me final video banao.")
+        return
+    connected = st.session_state.get("gemini_keys_ok") or []
+
+    if st.button("✨ Gemini se Titles banao", disabled=not connected,
+                 help="Sidebar me 🔑 Gemini keys Connect karo"):
+        try:
+            with st.spinner("Gemini titles soch raha hai..."):
+                titles = gemini_helper.generate_titles(
+                    connected, st.session_state["lines"])
+            st.session_state["gemini_titles"] = titles
+            save_project()
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Gemini fail: {e}")
 
     if st.session_state.get("gemini_titles"):
         pick = st.radio("Gemini ke titles — jo pasand aaye use chuno:",
@@ -654,38 +781,7 @@ if st.session_state["long_video"] and st.session_state["images"]:
                 st.session_state["meta"] = {"title": pick,
                                             "description": "", "tags": []}
             save_project()
-            st.success("Title laga diya ✅ — neeche metadata me dekho")
-
-    if st.button("🖼️ Thumbnail banao (simple wala)", type="primary"):
-        try:
-            img_list = [st.session_state["images"][i]
-                        for i in range(len(st.session_state["lines"]))]
-            out = Path(st.session_state["workdir"]) / "thumbnail.jpg"
-            _, words = thumbnail_gen.generate_thumbnail_for_script(
-                st.session_state["lines"], img_list, out)
-            st.session_state["thumb_path"] = str(out)
-            st.session_state["thumb_words"] = words
-            save_project()
-            st.success("Thumbnail tayyar ✅")
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Thumbnail fail: {e}")
-
-    t1, t2 = st.columns(2)
-    with t1:
-        if st.session_state["thumb_path"]:
-            st.caption("Simple thumbnail")
-            st.image(st.session_state["thumb_path"], use_container_width=True)
-            with open(st.session_state["thumb_path"], "rb") as f:
-                st.download_button("⬇️ Simple download karo", f,
-                                   file_name="thumbnail.jpg", mime="image/jpeg")
-    with t2:
-        if st.session_state.get("thumb_ai_path"):
-            st.caption("✨ Gemini AI thumbnail")
-            st.image(st.session_state["thumb_ai_path"], use_container_width=True)
-            with open(st.session_state["thumb_ai_path"], "rb") as f:
-                st.download_button("⬇️ AI thumbnail download karo", f,
-                                   file_name="thumbnail_ai.jpg",
-                                   mime="image/jpeg", key="dl_thumb_ai")
+            st.success("Title laga diya ✅")
 
     if st.button("📝 Title / Description / Tags banao"):
         meta = metadata_gen.make_metadata(
@@ -695,18 +791,20 @@ if st.session_state["long_video"] and st.session_state["images"]:
     if st.session_state["meta"]:
         meta = st.session_state["meta"]
         st.text_input("Title (copy karo)", meta["title"])
-        st.text_area("Description (copy karo)", meta["description"], height=180)
+        st.text_area("Description (copy karo)", meta["description"],
+                     height=180)
         st.text_area("Tags (copy karo)", ", ".join(meta["tags"]), height=80)
         st.download_button("⬇️ Metadata .txt download karo",
                            metadata_gen.metadata_text(meta),
-                           file_name="upload_metadata.txt", mime="text/plain")
-else:
-    st.info("Pehle final video banao (step 3) — phir thumbnail aur metadata.")
+                           file_name="upload_metadata.txt",
+                           mime="text/plain")
 
-# ================= STEP 5 — multi-language dub =================
-st.header("5️⃣ Doosri Languages me Dub (optional)")
 
-if st.session_state["long_video"] and st.session_state["images"]:
+def panel_dubs():
+    st.header("🌍 Doosri Languages me Dub (optional)")
+    if not (st.session_state["long_video"] and st.session_state["images"]):
+        st.info("Pehle 🎞 Edit & Video panel me final video banao.")
+        return
     lang_key = st.selectbox(
         "Dub language",
         list(dub_mod.DUB_VOICES.keys()),
@@ -720,7 +818,8 @@ if st.session_state["long_video"] and st.session_state["images"]:
             tlines = dub_mod.translate_lines(
                 st.session_state["lines"],
                 dub_mod.DUB_VOICES[lang_key]["dest"],
-                progress_cb=lambda p: bar.progress(p * 0.3, text="Translate ho raha hai..."),
+                progress_cb=lambda p: bar.progress(
+                    p * 0.3, text="Translate ho raha hai..."),
             )
             st.session_state[f"dub_lines_{lang_key}"] = tlines
             bar.progress(0.35, text="Dub voiceover ban raha hai...")
@@ -744,7 +843,8 @@ if st.session_state["long_video"] and st.session_state["images"]:
                 st.session_state.get("render_cfg", {}).get("music")
                 and MUSIC_BUNDLED.exists()) else None
             proj = build_project(norm_lines, mp3, st.session_state["images"],
-                                 music_path, workdir, f"project_dub_{lang_key}")
+                                 music_path, workdir,
+                                 f"project_dub_{lang_key}")
             with st.status(f"{dub_mod.DUB_VOICES[lang_key]['label']} video render ho rahi hai...",
                            expanded=True):
                 long_out, shorts_made = horror_edit.run_pipeline(
@@ -778,27 +878,17 @@ if st.session_state["long_video"] and st.session_state["images"]:
             st.download_button(f"⬇️ {label} voiceover MP3", f,
                                file_name=f"voiceover_{lk}.mp3",
                                mime="audio/mpeg", key=f"dl_dubv_{lk}")
-else:
-    st.info("Pehle final video banao (step 3) — phir dub.")
+
+
+_PANELS = {
+    "📝 Script": panel_script,
+    "🎙 Voice": panel_voice,
+    "🖼 Images": panel_images,
+    "🎞 Edit & Video": panel_edit,
+    "🖼️ Thumbnail": panel_thumbnail,
+    "🏷 Metadata": panel_metadata,
+    "🌍 Dubs": panel_dubs,
+}
+_PANELS[st.session_state.get("nav_step", STEPS[0])]()
 
 st.caption("💡 Tip: Horror Voice Studio wali voice yahin banti hai — alag app kholne ki zaroorat nahi.")
-
-# ================= Project save / clear =================
-with st.expander("⚙️ Project: save / naya shuru"):
-    st.caption("💾 Har step ke baad project auto-save hota hai — app band karke dobara kholo to wahi se continue hoga. Clear sirf tumhare button se hoga, khud kuch delete nahi hota.")
-    st.caption("ℹ️ Note: Streamlit ka server restart ho to save khatam ho sakta hai — is liye final video download karke zaroor rakh lo.")
-    st.session_state.setdefault("_clear_confirm2", False)
-    if st.button("🗑️ Naya project shuru karo (sab kuch clear)"):
-        st.session_state["_clear_confirm2"] = True
-    if st.session_state["_clear_confirm2"]:
-        st.error("⚠️ Pakka? Saara project (script, voiceover, images, video) delete ho jayega.")
-        _bc1, _bc2 = st.columns(2)
-        with _bc1:
-            if st.button("Haan, sab clear karo", key="clear_yes", type="primary"):
-                clear_saved_project()
-                st.session_state["_clear_confirm2"] = False
-                st.rerun()
-        with _bc2:
-            if st.button("Rehne do", key="clear_no"):
-                st.session_state["_clear_confirm2"] = False
-                st.rerun()
